@@ -1,74 +1,97 @@
-package repository
+package main
 
 import (
 	"context"
+	"demetra-farm/internal/domain"
+	"demetra-farm/internal/infrastructure"
+	"demetra-farm/internal/repository"
+	"demetra-farm/internal/usecase"
 	"encoding/json"
-	"fmt"
-	"regexp"
+	"log"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 )
 
-var shopIdRegex = regexp.MustCompile(`^CACHE_SHOP_PRODUCT_(\d+)_`)
+func main() {
+	log.Println("[INIT] Starting Demetra Farm Monitoring (Go Edition)...")
+	ctx := context.Background()
 
-type RedisRepo struct {
-	client *redis.Client
-}
+	// 1. Подключение к основному Redis (CACHE_HOST из твоего конфига)
+	// Используем данные: 89.207.255.61:6379
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     "89.207.255.61:6379",
+		Password: "iSx6Pi7QjhQRqFPgf6n9", // Твой пароль из конфига
+		DB:       0,                // Обычно 0, если не указано иное
+	})
 
-func NewRedisRepo(client *redis.Client) *RedisRepo {
-	return &RedisRepo{client: client}
-}
-
-func (r *RedisRepo) extractShopId(key string) string {
-	match := shopIdRegex.FindStringSubmatch(key)
-	if len(match) > 1 {
-		return match[1]
-	}
-	return ""
-}
-
-func (r *RedisRepo) SetJson(ctx context.Context, key string, data interface{}, ttl int) error {
-	val, err := json.Marshal(data)
+	// Проверка связи
+	err := rdb.Ping(ctx).Err()
 	if err != nil {
-		return err
+		log.Fatalf("[ERROR] Redis connection failed: %v", err)
 	}
-	pipe := r.client.Pipeline()
-	pipe.Set(ctx, key, val, 0)
-	pipe.Expire(ctx, key, time.Duration(ttl)*time.Second)
-	_, err = pipe.Exec(ctx)
-	return err
-}
+	log.Println("[OK] Redis connected (89.207.255.61)")
 
-func (r *RedisRepo) GetJson(ctx context.Context, key string, target interface{}) bool {
-	shopID := r.extractShopId(key)
-	if shopID != "" {
-		exists, _ := r.client.Exists(ctx, "DEL_"+shopID).Result()
-		if exists > 0 {
-			return false
+	// 2. Подключение к NATS
+	natsUrl := "nats://demetra:farmdemetrapassword@77.246.247.230:4222"
+	nc, err := nats.Connect(natsUrl,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(5*time.Second),
+	)
+	if err != nil {
+		log.Fatalf("[ERROR] NATS connection failed: %v", err)
+	}
+	log.Println("[OK] NATS connected")
+	defer nc.Close()
+
+	// 3. Инициализация слоев
+	pm := infrastructure.NewProxyManager()
+	rs := infrastructure.NewRequestService(pm)
+	cacheRepo := repository.NewRedisRepo(rdb)
+	kaspiRepo := repository.NewKaspiRepo(rs)
+	taskRepo := repository.NewTaskRepo(rdb)
+
+	monitor := usecase.NewMonitoringUseCase(cacheRepo, kaspiRepo, taskRepo)
+
+	// 4. Настройка подписки
+	subject := "farm"
+	queueGroup := "main_queue"
+
+	log.Printf("[LISTENING] Waiting for tasks on subject: %s...", subject)
+
+	_, err = nc.QueueSubscribe(subject, queueGroup, func(m *nats.Msg) {
+		// Обертка для NestJS (NestJS часто шлет данные в поле "data")
+		var envelope struct {
+			Data domain.IFarmPayload `json:"data"`
 		}
-	}
 
-	val, err := r.client.Get(ctx, key).Result()
+		// Сначала пробуем распаковать с оберткой "data" (как делает NestJS)
+		if err := json.Unmarshal(m.Data, &envelope); err != nil {
+			// Если не вышло, пробуем напрямую в Payload
+			var directPayload domain.IFarmPayload
+			if err := json.Unmarshal(m.Data, &directPayload); err != nil {
+				log.Printf("[ERROR] Failed to unmarshal NATS data: %v", err)
+				return
+			}
+			envelope.Data = directPayload
+		}
+
+		payload := envelope.Data
+		log.Printf("[RECEIVED] Task: Product %s, Shop %d", payload.ProductID, payload.ShopID)
+
+		// Ограничение как в Semaphore(150), чтобы не положить сервер
+		go func(p domain.IFarmPayload) {
+			if err := monitor.Execute(ctx, p); err != nil {
+				log.Printf("[ERROR] Execute failed for %s: %v", p.ProductID, err)
+			}
+		}(payload)
+	})
+
 	if err != nil {
-		return false
+		log.Fatal(err)
 	}
 
-	return json.Unmarshal([]byte(val), target) == nil
-}
-
-func (r *RedisRepo) ZAdd(ctx context.Context, key string, score float64, member string) error {
-	pipe := r.client.Pipeline()
-	pipe.ZAdd(ctx, key, redis.Z{Score: score, Member: member})
-	pipe.Expire(ctx, key, 24*time.Hour)
-	_, err := pipe.Exec(ctx)
-	return err
-}
-
-func (r *RedisRepo) Set(ctx context.Context, key string, val string, ttl int) error {
-	return r.client.Set(ctx, key, val, time.Duration(ttl)*time.Second).Err()
-}
-
-func (r *RedisRepo) Get(ctx context.Context, key string) (string, error) {
-	return r.client.Get(ctx, key).Result()
+	select {}
 }

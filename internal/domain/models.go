@@ -1,12 +1,12 @@
 package domain
 
 type KaspiSeller struct {
-    MerchantID              string  `json:"merchantId"`
-    MerchantName            string  `json:"merchantName"`
-    Price                   int     `json:"price"`
-    PriceMinusBonus        int     `json:"priceMinusBonus"`
-    LocatedInCity           string  `json:"locatedInCity"`
-    KaspiDelivery           bool    `json:"kaspiDelivery"`
+    MerchantID      string `json:"merchantId"`
+    MerchantName    string `json:"merchantName"`
+    Price           int    `json:"price"`
+    PriceMinusBonus int    `json:"priceMinusBonus"`
+    LocatedInCity   string `json:"locatedInCity"`
+    KaspiDelivery   bool   `json:"kaspiDelivery"`
 }
 
 type KaspiProductSellersM struct {
