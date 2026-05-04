@@ -37,13 +37,30 @@ func (r *RedisRepo) SetJson(ctx context.Context, key string, data interface{}, t
 }
 
 func (r *RedisRepo) Set(ctx context.Context, key string, val string, ttlSeconds int) error {
-	return r.client.Set(ctx, key, val, time.Duration(ttlSeconds)*time.Second).Err()
+    return r.client.Set(ctx, key, val, time.Duration(ttlSeconds)*time.Second).Err()
 }
 
 func (r *RedisRepo) Get(ctx context.Context, key string) (string, error) {
-	return r.client.Get(ctx, key).Result()
+    // Возвращаем пустую строку если ключа нет, чтобы не было паники
+    val, err := r.client.Get(ctx, key).Result()
+    if err == redis.Nil {
+        return "", nil
+    }
+    return val, err
 }
 
 func (r *RedisRepo) ZAdd(ctx context.Context, key string, score float64, member string) error {
-	return r.client.ZAdd(ctx, key, redis.Z{Score: score, Member: member}).Err()
+    err := r.client.ZAdd(ctx, key, redis.Z{Score: score, Member: member}).Err()
+    if err == nil {
+        r.client.Expire(ctx, key, 24*time.Hour) // Как в NestJS: multi.expire(key, 24h)
+    }
+    return err
+}
+
+func (r *RedisRepo) Incr(ctx context.Context, key string, ttlSeconds int) error {
+	pipe := r.client.Pipeline()
+	pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, time.Duration(ttlSeconds)*time.Second)
+	_, err := pipe.Exec(ctx)
+	return err
 }

@@ -3,8 +3,8 @@ package domain
 type KaspiSeller struct {
     MerchantID      string `json:"merchantId"`
     MerchantName    string `json:"merchantName"`
-    Price           int    `json:"price"`
-    PriceMinusBonus int    `json:"priceMinusBonus"`
+    Price           float64    `json:"price"`
+    PriceMinusBonus float64    `json:"priceMinusBonus"`
     LocatedInCity   string `json:"locatedInCity"`
     KaspiDelivery   bool   `json:"kaspiDelivery"`
 }
