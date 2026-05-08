@@ -14,6 +14,8 @@ type Config struct {
 	RedisBullPass  string
 	NatsURL        string
 	FarmName       string
+
+	ProxyURL string
 }
 
 func LoadConfig() *Config {
@@ -29,6 +31,8 @@ func LoadConfig() *Config {
 		RedisBullPass:  getEnv("REDIS_BULL_PASS", ""),
 		NatsURL:        getEnv("NATS_URL", "nats://127.0.0.1:4222"),
 		FarmName:       getEnv("FARM_NAME", "GO_FARM_DEFAULT"),
+
+		ProxyURL: getEnv("PROXY_URL", ""),
 	}
 }
 
@@ -36,5 +40,6 @@ func getEnv(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
+
 	return fallback
 }

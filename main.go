@@ -120,7 +120,11 @@ func main() {
 	// ----------------------------------------------------
 	// INIT SERVICES
 	// ----------------------------------------------------
-	pm := infrastructure.NewProxyManager()
+	pm := infrastructure.NewProxyManager([]infrastructure.Proxy{
+		{
+			URL: cfg.ProxyURL,
+		},
+	})
 	rs := infrastructure.NewRequestService(pm)
 
 	cacheRepo := repository.NewRedisRepo(rdbCache)

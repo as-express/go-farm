@@ -18,32 +18,32 @@ type ProxyType string
 
 const ProxyBot ProxyType = "bot"
 
-// Для benchmark лучше false.
-// Если надо дебажить конкретный request — временно поставь true.
 const debugHTTPLogs = false
 
 type Proxy struct {
-	IP   string
-	Port string
-	User string
-	Pass string
+	URL string
 }
 
 type ProxyManager struct {
 	proxies []Proxy
 }
-func NewProxyManager() *ProxyManager {
+
+func NewProxyManager(proxies []Proxy) *ProxyManager {
+	valid := make([]Proxy, 0, len(proxies))
+
+	for _, p := range proxies {
+		if p.URL == "" {
+			continue
+		}
+
+		valid = append(valid, p)
+	}
+
 	return &ProxyManager{
-		proxies: []Proxy{
-			{
-				IP:   "res-unlimited-ef41714c.plainproxies.com",
-				Port: "8080",
-				User: "IPNz1S83Ei",
-				Pass: "anZI8uGb8WpS3rZ",
-			},
-		},
+		proxies: valid,
 	}
 }
+
 func (pm *ProxyManager) GetByType(pt ProxyType) Proxy {
 	if len(pm.proxies) == 0 {
 		return Proxy{}
@@ -65,14 +65,6 @@ func NewRequestService(pm *ProxyManager) *RequestService {
 	}
 }
 
-// cancelReadCloser нужен, чтобы не вызывать cancel()
-// до того, как caller прочитал resp.Body.
-//
-// Иначе flow плохой:
-// client.Do() получил headers
-// cancel() отменил context
-// caller потом читает body
-// body может быть уже cancelled
 type cancelReadCloser struct {
 	io.ReadCloser
 	cancel context.CancelFunc
@@ -112,8 +104,6 @@ func (s *RequestService) Request(
 		p := s.proxyManager.GetByType(pType)
 		client := s.getClient(p)
 
-		// Было 8s. Для честного сравнения с Nest лучше не резать слишком жёстко.
-		// Если proxy/Kaspi иногда отвечает 9-12s, старый код убивал запрос.
 		attemptCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 
 		currentReq, err := s.cloneRequestWithContext(req, attemptCtx, bodyBytes)
@@ -128,12 +118,11 @@ func (s *RequestService) Request(
 
 		if debugHTTPLogs {
 			fmt.Printf(
-				"[HTTP_ATTEMPT] try=%d method=%s url=%s proxy=%s:%s\n",
+				"[HTTP_ATTEMPT] try=%d method=%s url=%s proxy=%s\n",
 				attempt+1,
 				req.Method,
 				req.URL.String(),
-				p.IP,
-				p.Port,
+				hideProxyPassword(p.URL),
 			)
 		}
 
@@ -152,9 +141,6 @@ func (s *RequestService) Request(
 				)
 			}
 
-			// ВАЖНО:
-			// cancel будет вызван только когда caller сделает resp.Body.Close().
-			// У тебя в KaspiRepo есть defer resp.Body.Close(), значит ок.
 			resp.Body = &cancelReadCloser{
 				ReadCloser: resp.Body,
 				cancel:    cancel,
@@ -164,7 +150,6 @@ func (s *RequestService) Request(
 		}
 
 		if resp != nil {
-			// Важно drain body перед close, чтобы Transport мог переиспользовать connection.
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 
@@ -204,12 +189,6 @@ func (s *RequestService) Request(
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-
-		// Для benchmark 1-в-1 с Nest retry делаем сразу.
-		// В production можно вернуть backoff только для rate-limit/proxy-many-requests.
-		//
-		// Было:
-		// time.Sleep(time.Duration(attempt+1) * 300 * time.Millisecond)
 	}
 
 	return nil, fmt.Errorf("all retries failed: %w", lastErr)
@@ -247,7 +226,10 @@ func (s *RequestService) cloneRequestWithContext(
 }
 
 func (s *RequestService) getClient(p Proxy) *http.Client {
-	key := fmt.Sprintf("%s:%s@%s:%s", p.User, p.Pass, p.IP, p.Port)
+	key := p.URL
+	if key == "" {
+		key = "NO_PROXY"
+	}
 
 	s.mu.RLock()
 	client, ok := s.clients[key]
@@ -265,37 +247,15 @@ func (s *RequestService) getClient(p Proxy) *http.Client {
 		return client
 	}
 
-	proxyRawURL := fmt.Sprintf(
-		"http://%s:%s@%s:%s",
-		url.QueryEscape(p.User),
-		url.QueryEscape(p.Pass),
-		p.IP,
-		p.Port,
-	)
-
-	proxyURL, err := url.Parse(proxyRawURL)
-	if err != nil {
-		// Лучше явно создать client без proxy не надо.
-		// Если proxy URL сломан — это конфигурационная ошибка.
-		panic(fmt.Sprintf("invalid proxy url: %v", err))
-	}
-
 	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
-
 		DialContext: (&net.Dialer{
 			Timeout:   8 * time.Second,
 			KeepAlive: 60 * time.Second,
 		}).DialContext,
 
-		// Старые 100/50 могут быть маленькие при 300+ goroutines и city parallel requests.
 		MaxIdleConns:        10000,
 		MaxIdleConnsPerHost: 1000,
-
-		// Ограничивает одновременные connections к proxy host.
-		// Для теста можно 1000.
-		// Если fail/proxy many requests растёт — уменьши до 300-500.
-		MaxConnsPerHost: 1000,
+		MaxConnsPerHost:     1000,
 
 		IdleConnTimeout:       120 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -305,6 +265,15 @@ func (s *RequestService) getClient(p Proxy) *http.Client {
 		ForceAttemptHTTP2: true,
 	}
 
+	if p.URL != "" {
+		proxyURL, err := url.Parse(p.URL)
+		if err != nil {
+			panic(fmt.Sprintf("invalid proxy url: %v", err))
+		}
+
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+
 	client = &http.Client{
 		Transport: transport,
 	}
@@ -312,7 +281,7 @@ func (s *RequestService) getClient(p Proxy) *http.Client {
 	s.clients[key] = client
 
 	if debugHTTPLogs {
-		fmt.Printf("[HTTP_CLIENT_CREATED] proxy=%s:%s\n", p.IP, p.Port)
+		fmt.Printf("[HTTP_CLIENT_CREATED] proxy=%s\n", hideProxyPassword(p.URL))
 	}
 
 	return client
@@ -326,4 +295,22 @@ func (s *RequestService) getRandomUserAgent() string {
 	}
 
 	return agents[rand.Intn(len(agents))]
+}
+
+func hideProxyPassword(raw string) string {
+	if raw == "" {
+		return ""
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "INVALID_PROXY_URL"
+	}
+
+	if u.User != nil {
+		username := u.User.Username()
+		u.User = url.UserPassword(username, "***")
+	}
+
+	return u.String()
 }
