@@ -16,12 +16,27 @@ var promoRegex = regexp.MustCompile(`BACKEND\.components\.item\s*=\s*({[\s\S]*?}
 
 type KaspiRepo struct {
 	requestService *infrastructure.RequestService
+	httpSem        chan struct{}
 }
 
 func NewKaspiRepo(rs *infrastructure.RequestService) *KaspiRepo {
 	return &KaspiRepo{
 		requestService: rs,
+		httpSem:        make(chan struct{}, 1500),
 	}
+}
+
+func (r *KaspiRepo) acquireHTTP(ctx context.Context) error {
+	select {
+	case r.httpSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *KaspiRepo) releaseHTTP() {
+	<-r.httpSem
 }
 
 func getProductSellersCookie(cityID string, hasPromo bool) string {
@@ -78,16 +93,16 @@ func (r *KaspiRepo) GetProductSellers(
 	promo interface{},
 ) (*domain.KaspiProductSellersM, error) {
 	data := map[string]interface{}{
-		"cityId":               cID,
-		"id":                   pID,
-		"merchantUID":          []string{},
-		"limit":                limit,
-		"page":                 0,
-		"sortOption":           "PRICE",
-		"highRating":           nil,
-		"searchText":           nil,
-		"isExcellentMerchant":  nil,
-		"zoneId":               nil,
+		"cityId":              cID,
+		"id":                  pID,
+		"merchantUID":         []string{},
+		"limit":               limit,
+		"page":                0,
+		"sortOption":          "PRICE",
+		"highRating":          nil,
+		"searchText":          nil,
+		"isExcellentMerchant": nil,
+		"zoneId":              nil,
 	}
 
 	if cID == "750000000" {
@@ -134,7 +149,12 @@ func (r *KaspiRepo) GetProductSellers(
 	req.Header.Set("X-Description-Enabled", "true")
 	req.Header.Set("Cookie", getProductSellersCookie(cID, promo != nil))
 
-	resp, err := r.requestService.Request(ctx, req, infrastructure.ProxyBot, 5)
+	if err := r.acquireHTTP(ctx); err != nil {
+		return nil, err
+	}
+	defer r.releaseHTTP()
+
+	resp, err := r.requestService.Request(ctx, req, infrastructure.ProxyBot, 3)
 	if err != nil {
 		return nil, fmt.Errorf("request service error: %w", err)
 	}
@@ -150,7 +170,6 @@ func (r *KaspiRepo) GetProductSellers(
 	}
 
 	var result domain.KaspiProductSellersM
-
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("unmarshal sellers response failed: %w, body: %s", err, string(respBody))
 	}
@@ -172,6 +191,11 @@ func (r *KaspiRepo) GetProductPromoConditions(
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Referer", "https://kaspi.kz/shop/")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	if err := r.acquireHTTP(ctx); err != nil {
+		return nil, err
+	}
+	defer r.releaseHTTP()
 
 	resp, err := r.requestService.Request(ctx, req, infrastructure.ProxyBot, 3)
 	if err != nil {

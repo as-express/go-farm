@@ -187,7 +187,7 @@ func (u *MonitoringUseCase) retryGetSellers(
 
 	var lastErr error
 
-	retryCount := 10
+	retryCount := 2
 
 	for retryCount > 0 {
 
@@ -231,7 +231,7 @@ func (u *MonitoringUseCase) retryGetSellers(
 
 
 	return nil, fmt.Errorf(
-		"retryGetSellers failed product=%s city=%s after 10 retries: %w",
+		"retryGetSellers failed product=%s city=%s after 2 retries: %w",
 		pID,
 		cID,
 		lastErr,

@@ -26,13 +26,9 @@ import (
 
 const executeJobs = true
 
-// Для сервера 8 CPU / 16 GB RAM.
-// Если Redis/Kaspi/proxy начнут захлёбываться — снижай до 1000–1500.
-const maxWorkers = 2000
+const maxWorkers = 1000
+const jobsBufferSize = 50000
 
-// Буфер задач перед worker pool.
-// Если он постоянно растёт — входящий поток больше, чем обработка.
-const jobsBufferSize = 100000
 
 func main() {
 	log.Println("[INIT] Starting Demetra Farm Monitoring")
